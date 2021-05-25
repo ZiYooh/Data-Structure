@@ -22,6 +22,7 @@ struct {
   struct spinlock lock;
   int use_lock;
   struct run *freelist;
+  uint pgrefcount[PHYSTOP >> PGSHIFT]; //Changed
 } kmem;
 
 // Initialization happens in two phases.
@@ -58,7 +59,7 @@ freerange(void *vstart, void *vend)
 // call to kalloc().  (The exception is when
 // initializing the allocator; see kinit above.)
 void
-kfree(char *v)
+kfree(char *v) //Changed
 {
   struct run *r;
 
@@ -66,14 +67,21 @@ kfree(char *v)
     panic("kfree");
 
   // Fill with junk to catch dangling refs.
-  memset(v, 1, PGSIZE);
+  // memset(v, 1, PGSIZE);
 
   if(kmem.use_lock)
     acquire(&kmem.lock);
-  numfreepages++;
-  r = (struct run*)v;
-  r->next = kmem.freelist;
-  kmem.freelist = r;
+   r = (struct run*)v;
+
+  if(kmem.pgrefcount[V2P(v) / PGSIZE] > 0) 
+    kmem.pgrefcount[V2P(v) / PGSIZE]--;
+  if(kmem.pgrefcount[V2P(v) / PGSIZE] == 0) //add page to free page list
+  {
+    memset(v, 1, PGSIZE);
+    numfreepages++;
+    r->next = kmem.freelist;
+    kmem.freelist = r;
+  }
   if(kmem.use_lock)
     release(&kmem.lock);
 }
@@ -82,7 +90,7 @@ kfree(char *v)
 // Returns a pointer that the kernel can use.
 // Returns 0 if the memory cannot be allocated.
 char*
-kalloc(void)
+kalloc(void) //Changed
 {
   struct run *r;
 
@@ -91,7 +99,10 @@ kalloc(void)
   numfreepages--;
   r = kmem.freelist;
   if(r)
+  {
     kmem.freelist = r->next;
+    kmem.pgrefcount[V2P((char*)r)/PGSIZE] = 1; //Initialize reference counter 1
+  }
   if(kmem.use_lock)
     release(&kmem.lock);
   return (char*)r;
@@ -101,3 +112,32 @@ int freemem(){
   return numfreepages;
 }
 
+uint get_refcounter(uint pa)
+{
+  uint cnt = 0;
+  if(kmem.use_lock)
+   acquire(&kmem.lock);
+  cnt = kmem.pgrefcount[pa/PGSIZE];
+  if(kmem.use_lock)
+   release(&kmem.lock);
+
+  return cnt;
+}
+
+void dec_refcounter(uint pa)
+{
+  if(kmem.use_lock)
+   acquire(&kmem.lock);
+  kmem.pgrefcount[pa/PGSIZE]--;
+  if(kmem.use_lock)
+   release(&kmem.lock);
+}
+
+void inc_refcounter(uint pa)
+{
+  if(kmem.use_lock)
+   acquire(&kmem.lock);
+  kmem.pgrefcount[pa/PGSIZE]++;
+  if(kmem.use_lock);
+   release(&kmem.lock);
+}
