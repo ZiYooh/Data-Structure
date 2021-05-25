@@ -78,11 +78,6 @@ trap(struct trapframe *tf)
     lapiceoi();
     break;
 
-  // page_fault 함수 인자 없게하고 대충 이름 변경
-  case T_PGFLT:
-    page_Fault(tf->err);
-    break;
-
   //PAGEBREAK: 13
   default:
     if(myproc() == 0 || (tf->cs&3) == 0){

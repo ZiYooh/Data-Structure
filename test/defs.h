@@ -69,12 +69,6 @@ void            kfree(char*);
 void            kinit1(void*, void*);
 void            kinit2(void*, void*);
 int				freemem(void);
-// 아래 함수병 변경
-uint 			num_Free_Frames(void);
-void 			increase_Page_Reference_Count(uint pa);
-void 			decrease_Page_Reference_Count(uint pa);
-uint 			get_Page_Reference_Count(uint pa);
-
 
 // kbd.c
 void            kbdintr(void);
@@ -192,9 +186,6 @@ void            switchuvm(struct proc*);
 void            switchkvm(void);
 int             copyout(pde_t*, uint, void*, uint);
 void            clearpteu(pde_t *pgdir, char *uva);
-// 아래 함수병 변경
-void            flush_tlb_all(void);
-void            page_Fault(uint err_code);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
