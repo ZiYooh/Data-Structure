@@ -1,191 +1,112 @@
-struct buf;
-struct context;
-struct file;
-struct inode;
-struct pipe;
-struct proc;
-struct rtcdate;
-struct spinlock;
-struct sleeplock;
-struct stat;
-struct superblock;
+#include "types.h"
+#include "defs.h"
+#include "param.h"
+#include "memlayout.h"
+#include "mmu.h"
+#include "proc.h"
+#include "x86.h"
+#include "traps.h"
+#include "spinlock.h"
 
-// bio.c
-void            binit(void);
-struct buf*     bread(uint, uint);
-void            brelse(struct buf*);
-void            bwrite(struct buf*);
+// Interrupt descriptor table (shared by all CPUs).
+struct gatedesc idt[256];
+extern uint vectors[];  // in vectors.S: array of 256 entry pointers
+struct spinlock tickslock;
+uint ticks, nflag;
 
-// console.c
-void            consoleinit(void);
-void            cprintf(char*, ...);
-void            consoleintr(int(*)(void));
-void            panic(char*) __attribute__((noreturn));
+void
+tvinit(void)
+{
+  int i;
 
-// exec.c
-int             exec(char*, char**);
+  for(i = 0; i < 256; i++)
+    SETGATE(idt[i], 0, SEG_KCODE<<3, vectors[i], 0);
+  SETGATE(idt[T_SYSCALL], 1, SEG_KCODE<<3, vectors[T_SYSCALL], DPL_USER);
 
-// file.c
-struct file*    filealloc(void);
-void            fileclose(struct file*);
-struct file*    filedup(struct file*);
-void            fileinit(void);
-int             fileread(struct file*, char*, int n);
-int             filestat(struct file*, struct stat*);
-int             filewrite(struct file*, char*, int n);
+  initlock(&tickslock, "time");
+}
 
-// fs.c
-void            readsb(int dev, struct superblock *sb);
-int             dirlink(struct inode*, char*, uint);
-struct inode*   dirlookup(struct inode*, char*, uint*);
-struct inode*   ialloc(uint, short);
-struct inode*   idup(struct inode*);
-void            iinit(int dev);
-void            ilock(struct inode*);
-void            iput(struct inode*);
-void            iunlock(struct inode*);
-void            iunlockput(struct inode*);
-void            iupdate(struct inode*);
-int             namecmp(const char*, const char*);
-struct inode*   namei(char*);
-struct inode*   nameiparent(char*, char*);
-int             readi(struct inode*, char*, uint, uint);
-void            stati(struct inode*, struct stat*);
-int             writei(struct inode*, char*, uint, uint);
+void
+idtinit(void)
+{
+  lidt(idt, sizeof(idt));
+}
 
-// ide.c
-void            ideinit(void);
-void            ideintr(void);
-void            iderw(struct buf*);
+//PAGEBREAK: 41
+void
+trap(struct trapframe *tf)
+{
+  if(tf->trapno == T_SYSCALL){
+    if(myproc()->killed)
+      exit();
+    myproc()->tf = tf;
+    syscall();
+    if(myproc()->killed)
+      exit();
+    return;
+  }
 
-// ioapic.c
-void            ioapicenable(int irq, int cpu);
-extern uchar    ioapicid;
-void            ioapicinit(void);
+  switch(tf->trapno){
+  case T_IRQ0 + IRQ_TIMER:
+    if(cpuid() == 0){
+      acquire(&tickslock);
+      ticks++;
+      wakeup(&ticks);
+      release(&tickslock);
+    }
+    lapiceoi();
+    break;
+  case T_IRQ0 + IRQ_IDE:
+    ideintr();
+    lapiceoi();
+    break;
+  case T_IRQ0 + IRQ_IDE+1:
+    // Bochs generates spurious IDE1 interrupts.
+    break;
+  case T_IRQ0 + IRQ_KBD:
+    kbdintr();
+    lapiceoi();
+    break;
+  case T_IRQ0 + IRQ_COM1:
+    uartintr();
+    lapiceoi();
+    break;
+  case T_IRQ0 + 7:
+  case T_IRQ0 + IRQ_SPURIOUS:
+    cprintf("cpu%d: spurious interrupt at %x:%x\n",
+            cpuid(), tf->cs, tf->eip);
+    lapiceoi();
+    break;
 
-// kalloc.c
-char*           kalloc(void);
-void            kfree(char*);
-void            kinit1(void*, void*);
-void            kinit2(void*, void*);
-int				freemem(void);
+  //PAGEBREAK: 13
+  default:
+    if(myproc() == 0 || (tf->cs&3) == 0){
+      // In kernel, it must be our mistake.
+      cprintf("unexpected trap %d from cpu %d eip %x (cr2=0x%x)\n",
+              tf->trapno, cpuid(), tf->eip, rcr2());
+      panic("trap");
+    }
+    // In user space, assume process misbehaved.
+    cprintf("pid %d %s: trap %d err %d on cpu %d "
+            "eip 0x%x addr 0x%x--kill proc\n",
+            myproc()->pid, myproc()->name, tf->trapno,
+            tf->err, cpuid(), tf->eip, rcr2());
+    myproc()->killed = 1;
+  }
 
-// kbd.c
-void            kbdintr(void);
+  // Force process exit if it has been killed and is in user space.
+  // (If it is still executing in the kernel, let it keep running
+  // until it gets to the regular system call return.)
+  if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
+    exit();
 
-// lapic.c
-void            cmostime(struct rtcdate *r);
-int             lapicid(void);
-extern volatile uint*    lapic;
-void            lapiceoi(void);
-void            lapicinit(void);
-void            lapicstartap(uchar, uint);
-void            microdelay(int);
+  // Force process to give up CPU on clock tick.
+  // If interrupts were on while locks held, would need to check nlock.
+  if(myproc() && myproc()->state == RUNNING &&
+     tf->trapno == T_IRQ0+IRQ_TIMER)
+    yield();
 
-// log.c
-void            initlog(int dev);
-void            log_write(struct buf*);
-void            begin_op();
-void            end_op();
-
-// mp.c
-extern int      ismp;
-void            mpinit(void);
-
-// picirq.c
-void            picenable(int);
-void            picinit(void);
-
-// pipe.c
-int             pipealloc(struct file**, struct file**);
-void            pipeclose(struct pipe*, int);
-int             piperead(struct pipe*, char*, int);
-int             pipewrite(struct pipe*, char*, int);
-
-//PAGEBREAK: 16
-// proc.c
-int             cpuid(void);
-void            exit(void);
-int             fork(void);
-int             growproc(int);
-int             kill(int);
-struct cpu*     mycpu(void);
-struct proc*    myproc();
-void            pinit(void);
-void            procdump(void);
-void            scheduler(void) __attribute__((noreturn));
-void            sched(void);
-void            setproc(struct proc*);
-void            sleep(void*, struct spinlock*);
-void            userinit(void);
-int             wait(void);
-void            wakeup(void*);
-void            yield(void);
-
-// swtch.S
-void            swtch(struct context**, struct context*);
-
-// spinlock.c
-void            acquire(struct spinlock*);
-void            getcallerpcs(void*, uint*);
-int             holding(struct spinlock*);
-void            initlock(struct spinlock*, char*);
-void            release(struct spinlock*);
-void            pushcli(void);
-void            popcli(void);
-
-// sleeplock.c
-void            acquiresleep(struct sleeplock*);
-void            releasesleep(struct sleeplock*);
-int             holdingsleep(struct sleeplock*);
-void            initsleeplock(struct sleeplock*, char*);
-
-// string.c
-int             memcmp(const void*, const void*, uint);
-void*           memmove(void*, const void*, uint);
-void*           memset(void*, int, uint);
-char*           safestrcpy(char*, const char*, int);
-int             strlen(const char*);
-int             strncmp(const char*, const char*, uint);
-char*           strncpy(char*, const char*, int);
-
-// syscall.c
-int             argint(int, int*);
-int             argptr(int, char**, int);
-int             argstr(int, char**);
-int             fetchint(uint, int*);
-int             fetchstr(uint, char**);
-void            syscall(void);
-
-// timer.c
-void            timerinit(void);
-
-// trap.c
-void            idtinit(void);
-extern uint     ticks;
-void            tvinit(void);
-extern struct spinlock tickslock;
-
-// uart.c
-void            uartinit(void);
-void            uartintr(void);
-void            uartputc(int);
-
-// vm.c
-void            seginit(void);
-void            kvmalloc(void);
-pde_t*          setupkvm(void);
-char*           uva2ka(pde_t*, char*);
-int             allocuvm(pde_t*, uint, uint);
-int             deallocuvm(pde_t*, uint, uint);
-void            freevm(pde_t*);
-void            inituvm(pde_t*, char*, uint);
-int             loaduvm(pde_t*, char*, struct inode*, uint, uint);
-pde_t*          copyuvm(pde_t*, uint);
-void            switchuvm(struct proc*);
-void            switchkvm(void);
-int             copyout(pde_t*, uint, void*, uint);
-void            clearpteu(pde_t *pgdir, char *uva);
-
-// number of elements in fixed-size array
-#define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+  // Check if the process has been killed since we yielded
+  if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
+    exit();
+}
